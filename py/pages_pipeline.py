@@ -10,11 +10,23 @@ from hip_inverse_dynamics import (
     com_from_joints_linear, GRAVITY, deleva_lower_limb_fractions
 )
 
-def _q_to_R(qw,qx,qy,qz):
-    nrm = (qw*qw+qx*qx+qy*qy+qz*qz)**0.5 or 1.0
-    w,x,y,z = qw/nrm, qx/nrm, qy/nrm, qz/nrm
-    return np.array([[1-2*(y*y+z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-                     [2*(x*z - y*w), 2*(y*z + x*w), 1-2*(x*x+y*y)]])
+def _q_to_R(qw, qx, qy, qz):
+    # Robust quaternion to rotation (returns 3x3; identity on invalid input)
+    if not (np.isfinite(qw) and np.isfinite(qx) and np.isfinite(qy) and np.isfinite(qz)):
+        return np.eye(3, dtype=float)
+    nrm = float((qw*qw + qx*qx + qy*qy + qz*qz) ** 0.5)
+    if not np.isfinite(nrm) or nrm <= 0:
+        return np.eye(3, dtype=float)
+    w, x, y, z = qw/nrm, qx/nrm, qy/nrm, qz/nrm
+    # Standard right-handed rotation matrix from unit quaternion (w,x,y,z)
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    wx, wy, wz = w*x, w*y, w*z
+    return np.array([
+        [1 - 2*(yy + zz), 2*(xy - wz),     2*(xz + wy)],
+        [2*(xy + wz),     1 - 2*(xx + zz), 2*(yz - wx)],
+        [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)]
+    ], dtype=float)
 
 def _read_xsens(path: str):
     # --- find actual header row (skip DeviceTag/Firmware... preamble) ---

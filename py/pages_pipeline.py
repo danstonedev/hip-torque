@@ -2,6 +2,7 @@
 # Client-side pipeline for Pyodide (browser). Uses only numpy/pandas + hip_inverse_dynamics.
 # Steps: load CSVs -> optional overlap cleaning -> optional standing calibration -> hip ID -> return JSON-friendly dict.
 import numpy as np, pandas as pd, io, json
+import re
 from itertools import islice
 from hip_inverse_dynamics import (
     SegmentKinematics, make_inertial_props, inverse_dynamics_lowerlimb_3D,
@@ -14,110 +15,70 @@ def _q_to_R(qw,qx,qy,qz):
     return np.array([[1-2*(y*y+z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
                      [2*(x*z - y*w), 2*(y*z + x*w), 1-2*(x*x+y*y)]])
 
-def _read_xsens(path):
-    # Detect header row where IMU fields appear and infer delimiter robustly
-    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-        lines = list(islice(f, 50))
-    if not lines:
-        raise ValueError(f"Empty or unreadable CSV: {path}")
+def _read_xsens(path: str) -> pd.DataFrame:
+    # --- find actual header row (skip DeviceTag/Firmware... preamble) ---
+    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
+        lines = f.readlines()
 
     header_idx = None
-    for i, line in enumerate(lines):
-        l = line.lower()
-        if ('quat' in l) or ('freeacc' in l) or ('orientation' in l):
+    for i, line in enumerate(lines[:300]):
+        if ("PacketCounter" in line or "PacketCount" in line) and ("Quat" in line or "FreeAcc" in line):
             header_idx = i
             break
     if header_idx is None:
-        # Fallback to first non-empty line if specific header not found
-        header_idx = next((i for i, ln in enumerate(lines) if ln.strip()), 0)
+        for i, line in enumerate(lines[:300]):
+            if (line.count(",") >= 4 or line.count("\t") >= 4) and ("Quat" in line or "FreeAcc" in line):
+                header_idx = i
+                break
+    if header_idx is None:
+        raise ValueError(f"Could not locate XSENS header row in {path}.\nFirst lines:\n{''.join(lines[:10])}")
 
-    # Delimiter detection
-    first = lines[0].strip().lower()
-    if first.startswith('sep='):
-        sep = first.split('=', 1)[1].strip() or ','
-    else:
-        hdr_line = lines[header_idx]
-        sep = ',' if hdr_line.count(',') >= hdr_line.count(';') else ';'
+    # robust delimiter detection
+    df = pd.read_csv(path, skiprows=header_idx, sep=None, engine="python")
 
-    # Read only header to get columns without loading entire file
-    df0 = pd.read_csv(path, sep=sep, header=header_idx, nrows=0, engine='python')
-    # Sanitize column names to match patterns robustly
-    orig_cols = list(df0.columns)
-    def sanitize(name: str) -> str:
-        s = str(name).strip().lower()
-        for ch in [' ', '\\t', '(', ')', '[', ']', '{', '}', '/', '\\', '-', ':']:
-            s = s.replace(ch, '_')
-        while '__' in s:
-            s = s.replace('__', '_')
-        return s.strip('_')
-    san_cols = [sanitize(c) for c in orig_cols]
-    # map sanitized -> original for retrieval
-    san_to_orig = {s:o for s,o in zip(san_cols, orig_cols)}
+    # --- sanitize & map columns ---
+    raw_cols = list(df.columns)
+
+    def san(s: str) -> str:
+        s = str(s).strip()
+        s = re.sub(r"[^0-9A-Za-z]+", "_", s)
+        s = re.sub(r"_+", "_", s)
+        return s.strip("_").lower()
+
+    san_cols = [san(c) for c in raw_cols]
+    san_to_orig = dict(zip(san_cols, raw_cols))
+
     def find_col(candidates, required=True):
+        def norm(x): return x.replace("_", "").lower()
         for cand in candidates:
-            if cand in san_to_orig:
-                return san_to_orig[cand]
-            # allow prefix match (e.g., freeacc_x_ms2)
+            c_norm = norm(cand)
             for s in san_cols:
-                if s.startswith(cand):
+                if s == cand.lower() or s.startswith(cand.lower()) or norm(s) == c_norm or norm(s).startswith(c_norm):
                     return san_to_orig[s]
         if required:
-            raise ValueError(f"Missing required column. Tried any of: {candidates} in {path}")
+            raise ValueError(
+                f"Missing required column. Tried any of: {candidates} in {path}\n"
+                f"Available (sanitized): {san_cols}"
+            )
         return None
-    # Resolve quaternion columns
-    qw_col = find_col(['quat_w','quaternion_w','orientation_w','ori_w','qw'])
-    qx_col = find_col(['quat_x','quaternion_x','orientation_x','ori_x','qx'])
-    qy_col = find_col(['quat_y','quaternion_y','orientation_y','ori_y','qy'])
-    qz_col = find_col(['quat_z','quaternion_z','orientation_z','ori_z','qz'])
-    # Resolve FreeAcc columns (world frame)
-    fax_col = find_col(['freeacc_x','free_acc_x','acc_free_x','free_acceleration_x'])
-    fay_col = find_col(['freeacc_y','free_acc_y','acc_free_y','free_acceleration_y'])
-    faz_col = find_col(['freeacc_z','free_acc_z','acc_free_z','free_acceleration_z'])
-    # Optional time column
-    stf_col = find_col(['sampletimefine','sample_time_fine','sample_time_fine_ticks','time_ms','timestamp'], required=False)
 
-    # Read only required columns now
-    usecols = [qw_col, qx_col, qy_col, qz_col, fax_col, fay_col, faz_col] + ([stf_col] if stf_col is not None else [])
-    df = pd.read_csv(path, sep=sep, header=header_idx, engine='python', usecols=usecols)
-    qw = df[qw_col].to_numpy(float); qx=df[qx_col].to_numpy(float)
-    qy = df[qy_col].to_numpy(float); qz=df[qz_col].to_numpy(float)
-    R = np.array([_q_to_R(qw[i],qx[i],qy[i],qz[i]) for i in range(len(df))])
-    if stf_col is not None:
-        # Auto-detect units for SampleTimeFine by matching expected 60 Hz dt
-        t_raw = df[stf_col].to_numpy(float)
-        if len(t_raw) > 1:
-            d = float(np.median(np.diff(t_raw)))
-            # Try common scales: microseconds, 0.1 ms ticks (10 kHz), milliseconds, seconds
-            scales = [1e6, 1e4, 1e3, 1.0]
-            target_dt = 1.0/60.0
-            diffs = [abs((d/s) - target_dt) for s in scales]
-            best_scale = scales[int(np.argmin(diffs))]
-            t = t_raw / best_scale
-        else:
-            t = np.array([0.0])
-        t = t - t[0]
-        inc = np.diff(t, prepend=t[0]-1e-6) > 0
-        if not inc.all():
-            # Drop duplicates/non-increasing
-            df = df[inc]; t = t[inc]; R = R[inc]
-    else:
-        t = np.arange(len(df))/60.0
-    # world-frame "FreeAcc"
-    ax=df[fax_col].to_numpy(float); ay=df[fay_col].to_numpy(float); az=df[faz_col].to_numpy(float)
-    Ab = np.column_stack([ax,ay,az])
-    Aw = np.einsum('tij,tj->ti', R, Ab)
-    # angular vel from Rdot
-    if len(t)>1:
-        dt = np.gradient(t)
-    else:
-        dt = np.array([1/60.0])
-    Rdot = np.gradient(R, axis=0) / dt[:,None,None]
-    omega = np.zeros((len(t),3))
-    for i in range(len(t)):
-        Wm = Rdot[i] @ R[i].T
-        omega[i] = np.array([Wm[2,1]-Wm[1,2], Wm[0,2]-Wm[2,0], Wm[1,0]-Wm[0,1]])*0.5
-    return dict(t=t, R=R, omega=omega, acc=Aw)
+    # quaternion + free-acc (accept Quat_W and q0..q3)
+    qw = find_col(['quat_w','quaternion_w','orientation_w','ori_w','qw','quatw','quaternionw','orientationw','oriw','q0'])
+    qx = find_col(['quat_x','quaternion_x','orientation_x','ori_x','qx','quatx','quaternionx','orientationx','orix','q1'])
+    qy = find_col(['quat_y','quaternion_y','orientation_y','ori_y','qy','quaty','quaterniony','orientationy','oriy','q2'])
+    qz = find_col(['quat_z','quaternion_z','orientation_z','ori_z','qz','quatz','quaternionz','orientationz','oriz','q3'])
 
+    fax = find_col(['freeacc_x','free_acc_x','freeaccx'])
+    fay = find_col(['freeacc_y','free_acc_y','freeaccy'])
+    faz = find_col(['freeacc_z','free_acc_z','freeaccz'])
+
+    for c in [qw, qx, qy, qz, fax, fay, faz]:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    return df[[qw, qx, qy, qz, fax, fay, faz]].rename(columns={
+        qw: 'quat_w', qx: 'quat_x', qy: 'quat_y', qz: 'quat_z',
+        fax: 'freeacc_x', fay: 'freeacc_y', faz: 'freeacc_z'
+    })
 def _overlap_window(ds):
     starts = [d["t"][0] for d in ds]
     ends   = [d["t"][-1] for d in ds]

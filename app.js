@@ -1,16 +1,20 @@
 let pyodide = null;
 let tsChart = null, cycleChart = null;
 let leftURL = null, rightURL = null;
-const ASSET_VERSION = 'v2025-08-27-1';
+const ASSET_VERSION = 'v2025-08-27-3';
 
 async function loadPyodideAndPackages() {
   if (pyodide) return pyodide;
   document.getElementById('status').textContent = 'Loading Python (Pyodide)...';
+  console.time('pyodide:init');
   pyodide = await loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.24.1/full/' });
+  console.timeEnd('pyodide:init');
   // Load required Python packages from the Pyodide distribution
   document.getElementById('status').textContent = 'Loading Python packages (numpy, pandas)...';
   try {
+    console.time('pyodide:packages');
     await pyodide.loadPackage([ 'numpy', 'pandas' ]);
+    console.timeEnd('pyodide:packages');
   } catch (e) {
     console.error('Failed to load Pyodide packages', e);
     document.getElementById('status').textContent = 'Error loading Python packages: ' + e.message;
@@ -54,15 +58,17 @@ async function runAnalysis() {
     const showStance = document.getElementById('showStance').checked;
 
     // Write files to Pyodide FS
-    const writeFile = async (file, path) => {
+  const writeFile = async (file, path) => {
       const buf = await file.arrayBuffer();
       pyodide.FS.writeFile(path, new Uint8Array(buf));
     };
-    await writeFile(fPelvis, '/tmp/pelvis.csv');
+  console.time('fs:write');
+  await writeFile(fPelvis, '/tmp/pelvis.csv');
     await writeFile(fLTh,    '/tmp/L_thigh.csv');
     await writeFile(fRTh,    '/tmp/R_thigh.csv');
     await writeFile(fLTb,    '/tmp/L_tibia.csv');
     await writeFile(fRTb,    '/tmp/R_tibia.csv');
+  console.timeEnd('fs:write');
 
     status.textContent = 'Running analysis...';
     const code = `
@@ -81,7 +87,9 @@ res = process_files(
 )
 json.dumps(res)
 `;
-    const resultJSON = await pyodide.runPythonAsync(code);
+  console.time('py:process_files');
+  const resultJSON = await pyodide.runPythonAsync(code);
+  console.timeEnd('py:process_files');
     const res = JSON.parse(resultJSON);
     status.textContent = 'Done.';
 

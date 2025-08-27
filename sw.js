@@ -56,20 +56,8 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // For Pyodide CDN assets, use cache-first to avoid re-downloading every visit
+  // Let Pyodide CDN assets bypass SW so module imports get proper CORS headers
   if (url.href.startsWith(PYODIDE_BASE)) {
-    event.respondWith((async () => {
-      const cached = await caches.match(request);
-      if (cached) return cached;
-      try {
-        const net = await fetch(request, { mode: 'no-cors' });
-        const cache = await caches.open(CACHE_NAME);
-        // Opaque responses (no-cors) can still be cached
-        cache.put(request, net.clone());
-        return net;
-      } catch (e) {
-        return Response.error();
-      }
-    })());
+    return; // don't intercept
   }
 });

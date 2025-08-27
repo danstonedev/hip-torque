@@ -1,6 +1,7 @@
 let pyodide = null;
 let tsChart = null, cycleChart = null;
 let leftURL = null, rightURL = null;
+const ASSET_VERSION = 'v2025-08-27-1';
 
 async function loadPyodideAndPackages() {
   if (pyodide) return pyodide;
@@ -15,10 +16,10 @@ async function loadPyodideAndPackages() {
     document.getElementById('status').textContent = 'Error loading Python packages: ' + e.message;
     throw e;
   }
-  // Load our Python files into the virtual FS
+  // Load our Python files into the virtual FS (with cache-busting)
   const files = {
-    'py/hip_inverse_dynamics.py': await (await fetch('py/hip_inverse_dynamics.py')).text(),
-    'py/pages_pipeline.py': await (await fetch('py/pages_pipeline.py')).text(),
+    'py/hip_inverse_dynamics.py': await (await fetch(`py/hip_inverse_dynamics.py?ver=${ASSET_VERSION}`, { cache: 'no-store' })).text(),
+    'py/pages_pipeline.py': await (await fetch(`py/pages_pipeline.py?ver=${ASSET_VERSION}`, { cache: 'no-store' })).text(),
   };
   for (const [path, text] of Object.entries(files)) {
     const parts = path.split('/'); let dir = '';
@@ -97,6 +98,12 @@ json.dumps(res)
     // Charts
     const tsCtx = document.getElementById('tsChart').getContext('2d');
     const cCtx = document.getElementById('cycleChart').getContext('2d');
+  // Downsample time series for plotting if very long
+  const dsStep = Math.max(1, Math.floor(res.time_s.length / 2000));
+  const ds = (arr) => arr.filter((_, i) => i % dsStep === 0);
+  const time_ds = ds(res.time_s);
+  const left_ts_ds = ds(res.left_ts);
+  const right_ts_ds = ds(res.right_ts);
     const commonOptions = {
       responsive: true, animation: false,
       scales: { x: { title: { display: true } }, y: { title: { display: true, text: 'Hip moment My (N·m)' } } },
@@ -104,10 +111,10 @@ json.dumps(res)
     };
     // Time-series overlay
     const tsData = {
-      labels: res.time_s,
+      labels: time_ds,
       datasets: [
-        { label: 'Left hip', data: res.left_ts, borderColor: '#6ea8fe', fill: false, pointRadius: 0 },
-        { label: 'Right hip', data: res.right_ts, borderColor: '#ff8fa3', fill: false, pointRadius: 0 }
+        { label: 'Left hip', data: left_ts_ds, borderColor: '#6ea8fe', fill: false, pointRadius: 0 },
+        { label: 'Right hip', data: right_ts_ds, borderColor: '#ff8fa3', fill: false, pointRadius: 0 }
       ]
     };
     if (tsChart) tsChart.destroy();

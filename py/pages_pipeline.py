@@ -2,6 +2,7 @@
 # Client-side pipeline for Pyodide (browser). Uses only numpy/pandas + hip_inverse_dynamics.
 # Steps: load CSVs -> optional overlap cleaning -> optional standing calibration -> hip ID -> return JSON-friendly dict.
 import numpy as np, pandas as pd, io, json
+import os
 import re
 from itertools import islice
 from hip_inverse_dynamics import (
@@ -101,6 +102,16 @@ def _read_xsens(path: str):
         t = v * scale if med > 0 else np.arange(T, dtype=float) * (1.0/60.0)
     else:
         t = np.arange(T, dtype=float) * (1.0/60.0)
+
+    # filename-based offset: last 3 digits before .csv are the start milliseconds
+    try:
+        base = os.path.splitext(os.path.basename(path))[0]
+        m = re.search(r"(\d{3})$", base)
+        if m:
+            start_ms = int(m.group(1))
+            t = t + (start_ms / 1000.0)
+    except Exception:
+        pass
 
     # quaternion to rotation matrices
     qwv = df[qw].to_numpy(dtype=float)

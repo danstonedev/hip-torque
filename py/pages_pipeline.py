@@ -2,6 +2,7 @@
 # Client-side pipeline for Pyodide (browser). Uses only numpy/pandas + hip_inverse_dynamics.
 # Steps: load CSVs -> optional overlap cleaning -> optional standing calibration -> hip ID -> return JSON-friendly dict.
 import numpy as np, pandas as pd, io, json
+import os
 import re
 from itertools import islice
 from hip_inverse_dynamics import (
@@ -15,7 +16,7 @@ def _q_to_R(qw,qx,qy,qz):
     return np.array([[1-2*(y*y+z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
                      [2*(x*z - y*w), 2*(y*z + x*w), 1-2*(x*x+y*y)]])
 
-def _read_xsens(path: str) -> pd.DataFrame:
+def _read_xsens(path: str):
     # --- find actual header row (skip DeviceTag/Firmware... preamble) ---
     with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
         lines = f.readlines()
@@ -72,13 +73,71 @@ def _read_xsens(path: str) -> pd.DataFrame:
     fay = find_col(['freeacc_y','free_acc_y','freeaccy'])
     faz = find_col(['freeacc_z','free_acc_z','freeaccz'])
 
-    for c in [qw, qx, qy, qz, fax, fay, faz]:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+    # optional high-res timestamp
+    stf = find_col(['sampletimefine','sample_time_fine','sample_timefine','sample_time','sampletime','timestamp','time'], required=False)
 
-    return df[[qw, qx, qy, qz, fax, fay, faz]].rename(columns={
-        qw: 'quat_w', qx: 'quat_x', qy: 'quat_y', qz: 'quat_z',
-        fax: 'freeacc_x', fay: 'freeacc_y', faz: 'freeacc_z'
-    })
+    # numeric conversion
+    for c in [qw, qx, qy, qz, fax, fay, faz] + ([stf] if stf else []):
+        if c is not None:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # build time vector in seconds
+    T = len(df)
+    if stf is not None and df[stf].notna().any():
+        v = df[stf].to_numpy()
+        v = v - (v[0] if len(v) else 0)
+        if len(v) > 1:
+            dv = np.diff(v)
+            med = float(np.nanmedian(np.abs(dv))) if np.isfinite(dv).any() else 0.0
+        else:
+            med = 0.0
+        # choose scale that best matches ~60 Hz (0.0167 s)
+        target_dt = 1.0/60.0
+        scales = [1e-6, 1e-4, 1e-3, 1.0]
+        if med > 0:
+            errs = [abs((med*s) - target_dt) for s in scales]
+            scale = scales[int(np.argmin(errs))]
+        else:
+            scale = 1.0/60.0  # fallback to indices
+        t = v * scale if med > 0 else np.arange(T, dtype=float) * (1.0/60.0)
+    else:
+        t = np.arange(T, dtype=float) * (1.0/60.0)
+
+    # filename-based offset: last 3 digits before .csv are the start milliseconds
+    try:
+        base = os.path.splitext(os.path.basename(path))[0]
+        m = re.search(r"(\d{3})$", base)
+        if m:
+            start_ms = int(m.group(1))
+            t = t + (start_ms / 1000.0)
+    except Exception:
+        pass
+
+    # quaternion to rotation matrices
+    qwv = df[qw].to_numpy(dtype=float)
+    qxv = df[qx].to_numpy(dtype=float)
+    qyv = df[qy].to_numpy(dtype=float)
+    qzv = df[qz].to_numpy(dtype=float)
+    R = np.zeros((T,3,3), dtype=float)
+    for i in range(T):
+        R[i] = _q_to_R(qwv[i], qxv[i], qyv[i], qzv[i])
+
+    # FreeAcc (sensor/body) -> world
+    Ab = np.column_stack([df[fax].to_numpy(dtype=float), df[fay].to_numpy(dtype=float), df[faz].to_numpy(dtype=float)])
+    Aw = np.einsum('tij,tj->ti', R, Ab)
+
+    # approximate angular velocity from orientation derivative
+    if T > 1:
+        dt_arr = np.gradient(t)
+        Rdot = np.gradient(R, axis=0) / dt_arr[:, None, None]
+        omega = np.zeros((T,3), dtype=float)
+        for i in range(T):
+            Wm = Rdot[i] @ R[i].T
+            omega[i] = np.array([Wm[2,1]-Wm[1,2], Wm[0,2]-Wm[2,0], Wm[1,0]-Wm[0,1]])*0.5
+    else:
+        omega = np.zeros((T,3), dtype=float)
+
+    return {"t": t, "R": R, "omega": omega, "acc": Aw}
 def _overlap_window(ds):
     starts = [d["t"][0] for d in ds]
     ends   = [d["t"][-1] for d in ds]

@@ -293,7 +293,7 @@ def _cycle_norm(t, y, stance):
     M = np.vstack(curves)
     return (np.linspace(0,100,101), M.mean(axis=0), M.std(axis=0))
 
-def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_cal=True, do_overlap=True):
+def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_cal=True, do_overlap=True, fast_mode=False):
     # 1) Load
     P = _read_xsens(pelvis)
     LTh = _read_xsens(L_thigh)
@@ -322,6 +322,26 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
         RTh = _calibrate(RTh)
         LTi = _calibrate(LTi)
         RTi = _calibrate(RTi)
+
+    # 3.5) Fast mode: decimate to ~60 Hz if higher
+    if fast_mode:
+        def decimate(d, target_hz=60.0):
+            t = d["t"]
+            if len(t) < 2:
+                return d
+            dt = float(np.median(np.diff(t)))
+            if dt <= 0:
+                return d
+            hz = 1.0/dt
+            if hz <= target_hz + 1e-3:
+                return d
+            step = max(1, int(round(hz/target_hz)))
+            return {k: (v[::step].copy() if hasattr(v, '__len__') else v) for k, v in d.items()}
+        P = decimate(P)
+        LTh = decimate(LTh)
+        RTh = decimate(RTh)
+        LTi = decimate(LTi)
+        RTi = decimate(RTi)
 
     # 4) Kinematics model
     scale = height / 1.75
@@ -373,9 +393,12 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
     tL, Mleft, stanceL = run_side(LTh, LTi)
     tR, Mright, stanceR = run_side(RTh, RTi)
 
-    # Cycle stats
+    # Cycle stats (lighter in fast mode: keep mean only)
     pctL, meanL, sdL = _cycle_norm(tL, Mleft, stanceL)
     pctR, meanR, sdR = _cycle_norm(tR, Mright, stanceR)
+    if fast_mode:
+        if meanL is not None: sdL = np.zeros_like(meanL)
+        if meanR is not None: sdR = np.zeros_like(meanR)
     if pctL is None or pctR is None:
         pct = list(np.linspace(0, 100, 101))
         meanL_list = sdL_list = meanR_list = sdR_list = [float('nan')] * 101

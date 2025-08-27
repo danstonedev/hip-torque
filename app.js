@@ -1,7 +1,7 @@
 let pyodide = null;
 let tsChart = null, cycleChart = null;
 let leftURL = null, rightURL = null;
-const ASSET_VERSION = 'v2025-08-27-3';
+const ASSET_VERSION = 'v2025-08-27-4';
 
 async function loadPyodideAndPackages() {
   if (pyodide) return pyodide;
@@ -55,7 +55,8 @@ async function runAnalysis() {
     const mass = parseFloat(document.getElementById('mass').value || '95.25');
     const doCal = document.getElementById('doCal').checked;
     const doOverlap = document.getElementById('doOverlap').checked;
-    const showStance = document.getElementById('showStance').checked;
+  const showStance = document.getElementById('showStance').checked;
+  const fastMode = document.getElementById('fastMode').checked;
 
     // Write files to Pyodide FS
   const writeFile = async (file, path) => {
@@ -83,7 +84,8 @@ res = process_files(
     height=${height},
     mass=${mass},
   do_cal=${doCal ? 'True' : 'False'},
-  do_overlap=${doOverlap ? 'True' : 'False'}
+  do_overlap=${doOverlap ? 'True' : 'False'},
+  fast_mode=${fastMode ? 'True' : 'False'}
 )
 json.dumps(res)
 `;

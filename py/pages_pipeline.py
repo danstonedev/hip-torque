@@ -39,9 +39,10 @@ def _read_xsens(path):
         hdr_line = lines[header_idx]
         sep = ',' if hdr_line.count(',') >= hdr_line.count(';') else ';'
 
-    df = pd.read_csv(path, sep=sep, header=header_idx, engine='python')
+    # Read only header to get columns without loading entire file
+    df0 = pd.read_csv(path, sep=sep, header=header_idx, nrows=0, engine='python')
     # Sanitize column names to match patterns robustly
-    orig_cols = list(df.columns)
+    orig_cols = list(df0.columns)
     def sanitize(name: str) -> str:
         s = str(name).strip().lower()
         for ch in [' ', '\\t', '(', ')', '[', ']', '{', '}', '/', '\\', '-', ':']:
@@ -75,7 +76,9 @@ def _read_xsens(path):
     # Optional time column
     stf_col = find_col(['sampletimefine','sample_time_fine','sample_time_fine_ticks','time_ms','timestamp'], required=False)
 
-    df.columns = orig_cols  # keep original for pandas ops
+    # Read only required columns now
+    usecols = [qw_col, qx_col, qy_col, qz_col, fax_col, fay_col, faz_col] + ([stf_col] if stf_col is not None else [])
+    df = pd.read_csv(path, sep=sep, header=header_idx, engine='python', usecols=usecols)
     qw = df[qw_col].to_numpy(float); qx=df[qx_col].to_numpy(float)
     qy = df[qy_col].to_numpy(float); qz=df[qz_col].to_numpy(float)
     R = np.array([_q_to_R(qw[i],qx[i],qy[i],qz[i]) for i in range(len(df))])
@@ -290,10 +293,10 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
         meanL_list = sdL_list = meanR_list = sdR_list = [float('nan')]*101
     else:
         pct = list(pctL)  # assume both are 0..100 same
-        meanL_list = list(meanL)
-        sdL_list = list(sdL)
-        meanR_list = list(meanR)
-        sdR_list = list(sdR)
+        meanL_list = list(meanL if meanL is not None else np.full(101, np.nan))
+        sdL_list = list(sdL if sdL is not None else np.full(101, np.nan))
+        meanR_list = list(meanR if meanR is not None else np.full(101, np.nan))
+        sdR_list = list(sdR if sdR is not None else np.full(101, np.nan))
 
     # CSVs
     left_df = pd.DataFrame({'time_s': tL, 'hip_My_Nm': Mleft})

@@ -5,6 +5,15 @@ async function loadPyodideAndPackages() {
   if (pyodide) return pyodide;
   document.getElementById('status').textContent = 'Loading Python (Pyodide)...';
   pyodide = await loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.24.1/full/' });
+  // Load required Python packages from the Pyodide distribution
+  document.getElementById('status').textContent = 'Loading Python packages (numpy, pandas)...';
+  try {
+    await pyodide.loadPackage([ 'numpy', 'pandas' ]);
+  } catch (e) {
+    console.error('Failed to load Pyodide packages', e);
+    document.getElementById('status').textContent = 'Error loading Python packages: ' + e.message;
+    throw e;
+  }
   // Load our Python files into the virtual FS
   const files = {
     'py/hip_inverse_dynamics.py': await (await fetch('py/hip_inverse_dynamics.py')).text(),

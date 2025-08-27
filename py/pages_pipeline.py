@@ -111,10 +111,11 @@ def _read_xsens(path: str):
 
     # Second pass: load only needed columns with fast C engine
     df = pd.read_csv(path, sep=sep, skiprows=header_idx, usecols=want_cols, engine="c")
-
-    # numeric conversion (ensure float dtype)
-    for c in want_cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+    # numeric conversion (ensure float32 dtype for compute-heavy columns)
+    for c in [qw, qx, qy, qz, fax, fay, faz]:
+        df[c] = pd.to_numeric(df[c], errors='coerce').astype('float32', copy=False)
+    if stf:
+        df[stf] = pd.to_numeric(df[stf], errors='coerce')
 
     # build time vector in seconds
     T = len(df)
@@ -149,18 +150,18 @@ def _read_xsens(path: str):
         pass
 
     # quaternion to rotation matrices (vectorized)
-    qwv = df[qw].to_numpy(dtype=float)
-    qxv = df[qx].to_numpy(dtype=float)
-    qyv = df[qy].to_numpy(dtype=float)
-    qzv = df[qz].to_numpy(dtype=float)
-    nrm = np.sqrt(qwv*qwv + qxv*qxv + qyv*qyv + qzv*qzv)
+    qwv = df[qw].to_numpy(dtype=np.float32, copy=False)
+    qxv = df[qx].to_numpy(dtype=np.float32, copy=False)
+    qyv = df[qy].to_numpy(dtype=np.float32, copy=False)
+    qzv = df[qz].to_numpy(dtype=np.float32, copy=False)
+    nrm = np.sqrt(qwv*qwv + qxv*qxv + qyv*qyv + qzv*qzv).astype(np.float32, copy=False)
     # avoid div by zero
     nrm[nrm == 0] = 1.0
     w = qwv / nrm; x = qxv / nrm; y = qyv / nrm; z = qzv / nrm
     xx, yy, zz = x*x, y*y, z*z
     xy, xz, yz = x*y, x*z, y*z
     wx, wy, wz = w*x, w*y, w*z
-    R = np.empty((T,3,3), dtype=float)
+    R = np.empty((T,3,3), dtype=np.float32)
     R[:,0,0] = 1 - 2*(yy + zz)
     R[:,0,1] = 2*(xy - wz)
     R[:,0,2] = 2*(xz + wy)
@@ -172,20 +173,24 @@ def _read_xsens(path: str):
     R[:,2,2] = 1 - 2*(xx + yy)
 
     # FreeAcc (sensor/body) -> world
-    Ab = np.column_stack([df[fax].to_numpy(dtype=float), df[fay].to_numpy(dtype=float), df[faz].to_numpy(dtype=float)])
-    Aw = np.einsum('tij,tj->ti', R, Ab)
+    Ab = np.column_stack([
+        df[fax].to_numpy(dtype=np.float32, copy=False),
+        df[fay].to_numpy(dtype=np.float32, copy=False),
+        df[faz].to_numpy(dtype=np.float32, copy=False)
+    ]).astype(np.float32, copy=False)
+    Aw = np.einsum('tij,tj->ti', R, Ab).astype(np.float32, copy=False)
 
     # approximate angular velocity from orientation derivative (vectorized)
     if T > 1:
         dt_arr = np.gradient(t)
         Rdot = np.gradient(R, axis=0) / dt_arr[:, None, None]
         Wm = np.einsum('tij,tjk->tik', Rdot, np.transpose(R, (0,2,1)))
-        omega = np.empty((T,3), dtype=float)
+        omega = np.empty((T,3), dtype=np.float32)
         omega[:,0] = 0.5*(Wm[:,2,1] - Wm[:,1,2])
         omega[:,1] = 0.5*(Wm[:,0,2] - Wm[:,2,0])
         omega[:,2] = 0.5*(Wm[:,1,0] - Wm[:,0,1])
     else:
-        omega = np.zeros((T,3), dtype=float)
+        omega = np.zeros((T,3), dtype=np.float32)
 
     return {"t": t, "R": R, "omega": omega, "acc": Aw}
 def _overlap_window(ds):

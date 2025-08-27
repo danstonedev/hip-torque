@@ -63,8 +63,8 @@ res = process_files(
     R_tibia='/tmp/R_tibia.csv',
     height=${height},
     mass=${mass},
-    do_cal=${'True' if doCal else 'False'},
-    do_overlap=${'True' if doOverlap else 'False'}
+  do_cal=${doCal ? 'True' : 'False'},
+  do_overlap=${doOverlap ? 'True' : 'False'}
 )
 json.dumps(res)
 `;

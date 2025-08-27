@@ -9,7 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
   <script type="module" src="./js/gpu/quats.webgpu.js"></script>
-  <script defer src="app.js?v=2025-08-27-4"></script>
+  <script type="module" defer src="app.js?v=2025-08-27-4"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -42,6 +42,7 @@
     </div>
     <div class="grid">
       <label><input type="checkbox" id="fastMode"/> Fast mode (cap at 60 Hz, lighter post-processing)</label>
+  <label><input type="checkbox" id="gpuAccel"/> GPU acceleration (WebGPU, experimental)</label>
     </div>
     <button id="runBtn">Run analysis</button>
     <div id="status"></div>

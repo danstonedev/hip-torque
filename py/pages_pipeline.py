@@ -415,7 +415,7 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
     left_csv = left_df.to_csv(index=False)
     right_csv = right_df.to_csv(index=False)
 
-    return dict(
+    out = dict(
         time_s=list(tL),
         left_ts=list(Mleft),
         right_ts=list(Mright),
@@ -427,3 +427,14 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
         left_csv=left_csv,
         right_csv=right_csv,
     )
+    # Optionally expose flat arrays for GPU experiments (kept backward-compatible)
+    try:
+        # Provide any one segment’s quaternion/accel as a demo hook
+        out["q_flat"] = list(np.column_stack([
+            LTh["R"][:,0,0]*0+1.0,  # placeholder w=1 (identity) since we currently rotate via R
+            LTh["R"][:,0,0]*0, LTh["R"][:,0,0]*0, LTh["R"][:,0,0]*0
+        ]).astype(np.float32).ravel())
+        out["acc_flat"] = list(LTh["acc"].astype(np.float32).ravel())
+    except Exception:
+        pass
+    return out

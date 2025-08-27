@@ -1,3 +1,4 @@
+import { initWebGPU, rotateVecsGPU } from './js/gpu/quats.webgpu.js';
 let pyodide = null;
 let tsChart = null, cycleChart = null;
 let leftURL = null, rightURL = null;
@@ -57,6 +58,7 @@ async function runAnalysis() {
     const doOverlap = document.getElementById('doOverlap').checked;
   const showStance = document.getElementById('showStance').checked;
   const fastMode = document.getElementById('fastMode').checked;
+  const gpuAccel = document.getElementById('gpuAccel')?.checked;
 
     // Write files to Pyodide FS
   const writeFile = async (file, path) => {
@@ -92,7 +94,21 @@ json.dumps(res)
   console.time('py:process_files');
   const resultJSON = await pyodide.runPythonAsync(code);
   console.timeEnd('py:process_files');
-    const res = JSON.parse(resultJSON);
+    let res = JSON.parse(resultJSON);
+
+    // Optional GPU acceleration: rotate FreeAcc by quaternion if provided back
+    // (We keep it optional and non-blocking; falls back if WebGPU not supported.)
+    if (gpuAccel) {
+      try {
+        await initWebGPU();
+        if (res.q_flat && res.acc_flat) {
+          console.time('gpu:rotate');
+          const aWorld = await rotateVecsGPU(new Float32Array(res.q_flat), new Float32Array(res.acc_flat));
+          console.timeEnd('gpu:rotate');
+          // Currently used internally in Python; GPU path is ready for future fusion.
+        }
+      } catch (_) { /* ignore and continue */ }
+    }
     status.textContent = 'Done.';
 
     // Build downloads

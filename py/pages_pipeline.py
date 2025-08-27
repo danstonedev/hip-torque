@@ -30,27 +30,44 @@ def _q_to_R(qw, qx, qy, qz):
 
 def _read_xsens(path: str):
     # --- find actual header row (skip DeviceTag/Firmware... preamble) ---
-    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
-        lines = f.readlines()
-
     header_idx = None
-    for i, line in enumerate(lines[:300]):
-        if ("PacketCounter" in line or "PacketCount" in line) and ("Quat" in line or "FreeAcc" in line):
-            header_idx = i
-            break
-    if header_idx is None:
-        for i, line in enumerate(lines[:300]):
-            if (line.count(",") >= 4 or line.count("\t") >= 4) and ("Quat" in line or "FreeAcc" in line):
+    header_line = None
+    preamble = []
+    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
+        for i, line in enumerate(f):
+            if i < 300:
+                preamble.append(line)
+            if ("PacketCounter" in line or "PacketCount" in line) and ("Quat" in line or "FreeAcc" in line):
                 header_idx = i
+                header_line = line
                 break
+        if header_idx is None:
+            # If not found yet, read up to 300 lines and pick likely header by density + keywords
+            for j, line in enumerate(islice(f, 0, 300)):
+                if (line.count(",") >= 4 or line.count("\t") >= 4) and ("Quat" in line or "FreeAcc" in line):
+                    header_idx = (i + 1) + j  # continue count
+                    header_line = line
+                    break
     if header_idx is None:
-        raise ValueError(f"Could not locate XSENS header row in {path}.\nFirst lines:\n{''.join(lines[:10])}")
+        sample = ''.join(preamble[:10])
+        raise ValueError(f"Could not locate XSENS header row in {path}.\nFirst lines:\n{sample}")
 
-    # robust delimiter detection
-    df = pd.read_csv(path, skiprows=header_idx, sep=None, engine="python")
+    # Infer separator deterministically (fast parser)
+    sep = ","
+    # explicit sep= hint
+    for l in preamble:
+        if l.lower().startswith("sep=") and len(l.strip()) >= 5:
+            sep = l.strip()[4]
+            break
+    else:
+        if header_line is not None:
+            sep = "\t" if header_line.count("\t") > header_line.count(",") else ","
+
+    # First pass: header only to get raw columns (fast)
+    df0 = pd.read_csv(path, sep=sep, skiprows=header_idx, nrows=0, engine="c")
+    raw_cols = list(df0.columns)
 
     # --- sanitize & map columns ---
-    raw_cols = list(df.columns)
 
     def san(s: str) -> str:
         s = str(s).strip()
@@ -88,10 +105,16 @@ def _read_xsens(path: str):
     # optional high-res timestamp
     stf = find_col(['sampletimefine','sample_time_fine','sample_timefine','sample_time','sampletime','timestamp','time'], required=False)
 
-    # numeric conversion
-    for c in [qw, qx, qy, qz, fax, fay, faz] + ([stf] if stf else []):
-        if c is not None:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+    # Build usecols with original names for fast parsing
+    want_cols = [qw, qx, qy, qz, fax, fay, faz]
+    if stf: want_cols.append(stf)
+
+    # Second pass: load only needed columns with fast C engine
+    df = pd.read_csv(path, sep=sep, skiprows=header_idx, usecols=want_cols, engine="c")
+
+    # numeric conversion (ensure float dtype)
+    for c in want_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
 
     # build time vector in seconds
     T = len(df)
@@ -125,27 +148,42 @@ def _read_xsens(path: str):
     except Exception:
         pass
 
-    # quaternion to rotation matrices
+    # quaternion to rotation matrices (vectorized)
     qwv = df[qw].to_numpy(dtype=float)
     qxv = df[qx].to_numpy(dtype=float)
     qyv = df[qy].to_numpy(dtype=float)
     qzv = df[qz].to_numpy(dtype=float)
-    R = np.zeros((T,3,3), dtype=float)
-    for i in range(T):
-        R[i] = _q_to_R(qwv[i], qxv[i], qyv[i], qzv[i])
+    nrm = np.sqrt(qwv*qwv + qxv*qxv + qyv*qyv + qzv*qzv)
+    # avoid div by zero
+    nrm[nrm == 0] = 1.0
+    w = qwv / nrm; x = qxv / nrm; y = qyv / nrm; z = qzv / nrm
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    wx, wy, wz = w*x, w*y, w*z
+    R = np.empty((T,3,3), dtype=float)
+    R[:,0,0] = 1 - 2*(yy + zz)
+    R[:,0,1] = 2*(xy - wz)
+    R[:,0,2] = 2*(xz + wy)
+    R[:,1,0] = 2*(xy + wz)
+    R[:,1,1] = 1 - 2*(xx + zz)
+    R[:,1,2] = 2*(yz - wx)
+    R[:,2,0] = 2*(xz - wy)
+    R[:,2,1] = 2*(yz + wx)
+    R[:,2,2] = 1 - 2*(xx + yy)
 
     # FreeAcc (sensor/body) -> world
     Ab = np.column_stack([df[fax].to_numpy(dtype=float), df[fay].to_numpy(dtype=float), df[faz].to_numpy(dtype=float)])
     Aw = np.einsum('tij,tj->ti', R, Ab)
 
-    # approximate angular velocity from orientation derivative
+    # approximate angular velocity from orientation derivative (vectorized)
     if T > 1:
         dt_arr = np.gradient(t)
         Rdot = np.gradient(R, axis=0) / dt_arr[:, None, None]
-        omega = np.zeros((T,3), dtype=float)
-        for i in range(T):
-            Wm = Rdot[i] @ R[i].T
-            omega[i] = np.array([Wm[2,1]-Wm[1,2], Wm[0,2]-Wm[2,0], Wm[1,0]-Wm[0,1]])*0.5
+        Wm = np.einsum('tij,tjk->tik', Rdot, np.transpose(R, (0,2,1)))
+        omega = np.empty((T,3), dtype=float)
+        omega[:,0] = 0.5*(Wm[:,2,1] - Wm[:,1,2])
+        omega[:,1] = 0.5*(Wm[:,0,2] - Wm[:,2,0])
+        omega[:,2] = 0.5*(Wm[:,1,0] - Wm[:,0,1])
     else:
         omega = np.zeros((T,3), dtype=float)
 

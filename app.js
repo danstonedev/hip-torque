@@ -155,4 +155,10 @@ json.dumps(res)
 
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('runBtn').addEventListener('click', runAnalysis);
+  // Warm up Pyodide in the background so it's ready by the time the user selects files
+  try { loadPyodideAndPackages(); } catch(e) { /* ignore */ }
+  // Register service worker for caching Pyodide and app shell
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  }
 });

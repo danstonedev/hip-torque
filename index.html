@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>IMU-only Hip Torque (MVP)</title>
+  <link rel="stylesheet" href="style.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>IMU-only Hip Torque (MVP)</h1>
+    <p>Compute sagittal-plane hip torque from 5 IMUs (pelvis, L/R thigh, L/R tibia) entirely in your browser.</p>
+  </header>
+
+  <section class="card">
+    <h2>Upload XSENS CSVs</h2>
+    <div class="grid">
+      <label>Pelvis CSV<input type="file" id="pelvis" accept=".csv" /></label>
+      <label>Left Thigh CSV<input type="file" id="lthigh" accept=".csv" /></label>
+      <label>Right Thigh CSV<input type="file" id="rthigh" accept=".csv" /></label>
+      <label>Left Tibia CSV<input type="file" id="ltibia" accept=".csv" /></label>
+      <label>Right Tibia CSV<input type="file" id="rtibia" accept=".csv" /></label>
+    </div>
+    <div class="grid two">
+      <label>Height (m)<input type="number" id="height" step="0.001" value="1.70"/></label>
+      <label>Mass (kg)<input type="number" id="mass" step="0.1" value="95.25"/></label>
+    </div>
+    <div class="grid three">
+      <label><input type="checkbox" id="doCal" checked/> Standing calibration</label>
+      <label><input type="checkbox" id="doOverlap" checked/> Strict overlap cleaning</label>
+      <label><input type="checkbox" id="showStance" checked/> Show stance shading</label>
+    </div>
+    <button id="runBtn">Run analysis</button>
+    <div id="status"></div>
+  </section>
+
+  <section class="card">
+    <h2>Time-series Comparison</h2>
+    <canvas id="tsChart"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>Cycle-normalized Comparison</h2>
+    <canvas id="cycleChart"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>Downloads</h2>
+    <div class="grid two">
+      <a id="dlLeft" class="btn" download="hip_left_calibrated_clean.csv">Download Left CSV</a>
+      <a id="dlRight" class="btn" download="hip_right_calibrated_clean.csv">Download Right CSV</a>
+    </div>
+  </section>
+
+  <footer>
+    <p>Built for client-side only; your data never leaves the browser.</p>
+  </footer>
+</body>
+</html>

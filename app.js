@@ -1,5 +1,6 @@
 let pyodide = null;
 let tsChart = null, cycleChart = null;
+let leftURL = null, rightURL = null;
 
 async function loadPyodideAndPackages() {
   if (pyodide) return pyodide;
@@ -31,6 +32,8 @@ async function loadPyodideAndPackages() {
 
 async function runAnalysis() {
   try {
+  const runBtn = document.getElementById('runBtn');
+  runBtn.disabled = true; runBtn.textContent = 'Running...';
     await loadPyodideAndPackages();
     const status = document.getElementById('status');
     status.textContent = 'Reading files...';
@@ -82,10 +85,14 @@ json.dumps(res)
     status.textContent = 'Done.';
 
     // Build downloads
-    const leftCsv = new Blob([res.left_csv], {type:'text/csv'});
-    document.getElementById('dlLeft').href = URL.createObjectURL(leftCsv);
-    const rightCsv = new Blob([res.right_csv], {type:'text/csv'});
-    document.getElementById('dlRight').href = URL.createObjectURL(rightCsv);
+  const leftCsv = new Blob([res.left_csv], {type:'text/csv'});
+  if (leftURL) URL.revokeObjectURL(leftURL);
+  leftURL = URL.createObjectURL(leftCsv);
+  document.getElementById('dlLeft').href = leftURL;
+  const rightCsv = new Blob([res.right_csv], {type:'text/csv'});
+  if (rightURL) URL.revokeObjectURL(rightURL);
+  rightURL = URL.createObjectURL(rightCsv);
+  document.getElementById('dlRight').href = rightURL;
 
     // Charts
     const tsCtx = document.getElementById('tsChart').getContext('2d');
@@ -133,6 +140,9 @@ json.dumps(res)
   } catch (err) {
     console.error(err);
     document.getElementById('status').textContent = 'Error: ' + err.message;
+  } finally {
+    const runBtn = document.getElementById('runBtn');
+    runBtn.disabled = false; runBtn.textContent = 'Run analysis';
   }
 }
 

@@ -2,6 +2,7 @@
 # Client-side pipeline for Pyodide (browser). Uses only numpy/pandas + hip_inverse_dynamics.
 # Steps: load CSVs -> optional overlap cleaning -> optional standing calibration -> hip ID -> return JSON-friendly dict.
 import numpy as np, pandas as pd, io, json
+from itertools import islice
 from hip_inverse_dynamics import (
     SegmentKinematics, make_inertial_props, inverse_dynamics_lowerlimb_3D,
     com_from_joints_linear, GRAVITY, deleva_lower_limb_fractions
@@ -14,23 +15,74 @@ def _q_to_R(qw,qx,qy,qz):
                      [2*(x*z - y*w), 2*(y*z + x*w), 1-2*(x*x+y*y)]])
 
 def _read_xsens(path):
-    # detect header row where Quat_W appears in first 20 lines
+    # Detect header row where IMU fields appear and infer delimiter robustly
     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-        lines = [next(f) for _ in range(20)]
+        lines = list(islice(f, 50))
+    if not lines:
+        raise ValueError(f"Empty or unreadable CSV: {path}")
+
     header_idx = None
     for i, line in enumerate(lines):
-        if 'Quat_W' in line:
-            header_idx = i; break
+        l = line.lower()
+        if ('quat' in l) or ('freeacc' in l) or ('orientation' in l):
+            header_idx = i
+            break
     if header_idx is None:
-        header_idx = 10  # fallback (typical XSENS Dots export)
-    sep = ',' if lines[0].strip().lower().startswith('sep=,') else ';'
-    df = pd.read_csv(path, sep=sep, header=header_idx)
-    df.columns = [c.strip() for c in df.columns]
-    qw = df['Quat_W'].to_numpy(float); qx=df['Quat_X'].to_numpy(float)
-    qy = df['Quat_Y'].to_numpy(float); qz=df['Quat_Z'].to_numpy(float)
+        # Fallback to first non-empty line if specific header not found
+        header_idx = next((i for i, ln in enumerate(lines) if ln.strip()), 0)
+
+    # Delimiter detection
+    first = lines[0].strip().lower()
+    if first.startswith('sep='):
+        sep = first.split('=', 1)[1].strip() or ','
+    else:
+        hdr_line = lines[header_idx]
+        sep = ',' if hdr_line.count(',') >= hdr_line.count(';') else ';'
+
+    df = pd.read_csv(path, sep=sep, header=header_idx, engine='python')
+    # Sanitize column names to match patterns robustly
+    orig_cols = list(df.columns)
+    def sanitize(name: str) -> str:
+        s = str(name).strip().lower()
+        for ch in [' ', '\\t', '(', ')', '[', ']', '{', '}', '/', '\\', '-', ':']:
+            s = s.replace(ch, '_')
+        while '__' in s:
+            s = s.replace('__', '_')
+        return s.strip('_')
+    san_cols = [sanitize(c) for c in orig_cols]
+    # map sanitized -> original for retrieval
+    san_to_orig = {s:o for s,o in zip(san_cols, orig_cols)}
+    def find_col(candidates, required=True):
+        for cand in candidates:
+            if cand in san_to_orig:
+                return san_to_orig[cand]
+            # allow prefix match (e.g., freeacc_x_ms2)
+            for s in san_cols:
+                if s.startswith(cand):
+                    return san_to_orig[s]
+        if required:
+            raise ValueError(f"Missing required column. Tried any of: {candidates} in {path}")
+        return None
+    # Resolve quaternion columns
+    qw_col = find_col(['quat_w','quaternion_w','orientation_w','ori_w','qw'])
+    qx_col = find_col(['quat_x','quaternion_x','orientation_x','ori_x','qx'])
+    qy_col = find_col(['quat_y','quaternion_y','orientation_y','ori_y','qy'])
+    qz_col = find_col(['quat_z','quaternion_z','orientation_z','ori_z','qz'])
+    # Resolve FreeAcc columns (world frame)
+    fax_col = find_col(['freeacc_x','free_acc_x','acc_free_x','free_acceleration_x'])
+    fay_col = find_col(['freeacc_y','free_acc_y','acc_free_y','free_acceleration_y'])
+    faz_col = find_col(['freeacc_z','free_acc_z','acc_free_z','free_acceleration_z'])
+    # Optional time column
+    stf_col = find_col(['sampletimefine','sample_time_fine','sample_time_fine_ticks','time_ms','timestamp'], required=False)
+
+    df.columns = orig_cols  # keep original for pandas ops
+    qw = df[qw_col].to_numpy(float); qx=df[qx_col].to_numpy(float)
+    qy = df[qy_col].to_numpy(float); qz=df[qz_col].to_numpy(float)
     R = np.array([_q_to_R(qw[i],qx[i],qy[i],qz[i]) for i in range(len(df))])
-    if 'SampleTimeFine' in df.columns:
-        t = df['SampleTimeFine'].to_numpy(float) / 1e4
+    if stf_col is not None:
+        # Heuristic: SampleTimeFine is in 0.1 ms ticks (10 kHz). If value seems very large, divide accordingly
+        t_raw = df[stf_col].to_numpy(float)
+        t = t_raw / (1e4 if t_raw.max() > 1e3 else 1.0)
         t = t - t[0]
         inc = np.diff(t, prepend=t[0]-1e-6) > 0
         if not inc.all():
@@ -39,7 +91,7 @@ def _read_xsens(path):
     else:
         t = np.arange(len(df))/60.0
     # world-frame "FreeAcc"
-    ax=df['FreeAcc_X'].to_numpy(float); ay=df['FreeAcc_Y'].to_numpy(float); az=df['FreeAcc_Z'].to_numpy(float)
+    ax=df[fax_col].to_numpy(float); ay=df[fay_col].to_numpy(float); az=df[faz_col].to_numpy(float)
     Ab = np.column_stack([ax,ay,az])
     Aw = np.einsum('tij,tj->ti', R, Ab)
     # angular vel from Rdot
@@ -235,9 +287,13 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
     pctR, meanR, sdR = _cycle_norm(tR, Mright, stanceR)
     if pctL is None or pctR is None:
         pct = list(np.linspace(0,100,101))
-        meanL = sdL = meanR = sdR = [float('nan')]*101
+        meanL_list = sdL_list = meanR_list = sdR_list = [float('nan')]*101
     else:
         pct = list(pctL)  # assume both are 0..100 same
+        meanL_list = list(meanL)
+        sdL_list = list(sdL)
+        meanR_list = list(meanR)
+        sdR_list = list(sdR)
 
     # CSVs
     left_df = pd.DataFrame({'time_s': tL, 'hip_My_Nm': Mleft})
@@ -250,10 +306,10 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
         left_ts=list(Mleft),
         right_ts=list(Mright),
         cycle_pct=pct,
-        left_mean=list(meanL),
-        left_sd=list(sdL),
-        right_mean=list(meanR),
-        right_sd=list(sdR),
+    left_mean=meanL_list,
+    left_sd=sdL_list,
+    right_mean=meanR_list,
+    right_sd=sdR_list,
         left_csv=left_csv,
         right_csv=right_csv,
     )

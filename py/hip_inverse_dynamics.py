@@ -284,6 +284,75 @@ def inverse_dynamics_lowerlimb_3D(kin_foot, kin_shank, kin_thigh,
 
 
 # -------------------------------
+# Batched Newton–Euler (vectorized across time)
+# -------------------------------
+
+def inverse_dynamics_lowerlimb_3D_batch(
+    R_foot_WB, omega_foot_W, alpha_foot_W, rCOM_foot_W, aCOM_foot_W, r_ankle_W, r_toe_W,
+    R_shank_WB, omega_shank_W, alpha_shank_W, rCOM_shank_W, aCOM_shank_W, r_knee_W,
+    R_thigh_WB, omega_thigh_W, alpha_thigh_W, rCOM_thigh_W, aCOM_thigh_W, r_hip_W,
+    prop_foot, prop_shank, prop_thigh,
+    F_GRF_W, r_CoP_W, M_free_W=None
+):
+    """Vectorized inverse dynamics for foot→shank→thigh over all frames.
+    Inputs are arrays over time with shapes:
+      R_*: (T,3,3), omega_*, alpha_*: (T,3), rCOM_*, aCOM_*: (T,3)
+      joint positions r_ankle_W, r_toe_W, r_knee_W, r_hip_W: (T,3)
+      F_GRF_W, r_CoP_W: (T,3)
+    Returns: dict with arrays of JointLoads components. Currently returns only hip moment array (T,3).
+    """
+    T = R_foot_WB.shape[0]
+    g = GRAVITY
+
+    # Helper: rotate body inertia to world for every frame
+    def world_inertia_batch(Rs, I_body):
+        Rt = np.transpose(Rs, (0, 2, 1))
+        # Iw = R * I * R^T
+        RI = np.einsum('tij,jk->tik', Rs, I_body)
+        return np.einsum('tij,tjk->tik', RI, Rt)
+
+    # FOOT
+    IwF = world_inertia_batch(R_foot_WB, prop_foot.I_body_COM)
+    IwF_omega = np.einsum('tij,tj->ti', IwF, omega_foot_W)
+    Hf = np.einsum('tij,tj->ti', IwF, alpha_foot_W) + np.cross(omega_foot_W, IwF_omega)
+    mF = prop_foot.mass
+    F_ankle_on_foot = mF * (aCOM_foot_W + g) - F_GRF_W
+    r_a2c_f = r_ankle_W - rCOM_foot_W
+    r_cop2c = r_CoP_W - rCOM_foot_W
+    if M_free_W is None:
+        M_free = np.zeros((T,3))
+    else:
+        M_free = M_free_W
+    M_ankle_on_foot = Hf - np.cross(r_a2c_f, F_ankle_on_foot) - M_free - np.cross(r_cop2c, F_GRF_W)
+    F_ankle_on_shank = -F_ankle_on_foot
+    M_ankle_on_shank = -M_ankle_on_foot
+
+    # SHANK
+    IwS = world_inertia_batch(R_shank_WB, prop_shank.I_body_COM)
+    IwS_omega = np.einsum('tij,tj->ti', IwS, omega_shank_W)
+    Hs = np.einsum('tij,tj->ti', IwS, alpha_shank_W) + np.cross(omega_shank_W, IwS_omega)
+    mS = prop_shank.mass
+    F_knee_on_shank = mS * (aCOM_shank_W + g) - F_ankle_on_shank
+    r_k2c_s = r_knee_W - rCOM_shank_W
+    r_a2c_s = r_ankle_W - rCOM_shank_W
+    M_knee_on_shank = Hs - np.cross(r_a2c_s, F_ankle_on_shank) - M_ankle_on_shank - np.cross(r_k2c_s, F_knee_on_shank)
+    F_knee_on_thigh = -F_knee_on_shank
+    M_knee_on_thigh = -M_knee_on_shank
+
+    # THIGH
+    IwT = world_inertia_batch(R_thigh_WB, prop_thigh.I_body_COM)
+    IwT_omega = np.einsum('tij,tj->ti', IwT, omega_thigh_W)
+    Ht = np.einsum('tij,tj->ti', IwT, alpha_thigh_W) + np.cross(omega_thigh_W, IwT_omega)
+    mT = prop_thigh.mass
+    F_hip_on_thigh = mT * (aCOM_thigh_W + g) - F_knee_on_thigh
+    r_h2c_t = r_hip_W - rCOM_thigh_W
+    r_k2c_t = r_knee_W - rCOM_thigh_W
+    M_hip_on_thigh = Ht - np.cross(r_k2c_t, F_knee_on_thigh) - M_knee_on_thigh - np.cross(r_h2c_t, F_hip_on_thigh)
+
+    return {"hip_M_W": M_hip_on_thigh}
+
+
+# -------------------------------
 # Utility: build COM from joints (linear along segment) if needed
 # -------------------------------
 

@@ -222,16 +222,14 @@ def _calibrate(d):
     Rstat = _avg_rot(Rs)
     C = Rstat.T
     Rcal = np.einsum('tij,jk->tik', d["R"], C)
-    # recompute omega
-    if len(d["t"])>1:
-        dt_arr = np.gradient(d["t"])
-    else:
-        dt_arr = np.array([1/60.0])
+    # recompute omega (vectorized)
+    dt_arr = np.gradient(d["t"]) if len(d["t"])>1 else np.array([1/60.0])
     Rdot = np.gradient(Rcal, axis=0) / dt_arr[:,None,None]
-    omega = np.zeros_like(d["omega"])
-    for i in range(len(omega)):
-        Wm = Rdot[i] @ Rcal[i].T
-        omega[i] = np.array([Wm[2,1]-Wm[1,2], Wm[0,2]-Wm[2,0], Wm[1,0]-Wm[0,1]])*0.5
+    Wm = np.einsum('tij,tjk->tik', Rdot, np.transpose(Rcal, (0,2,1)))
+    omega = np.empty_like(d["omega"])  # (T,3)
+    omega[:,0] = 0.5*(Wm[:,2,1] - Wm[:,1,2])
+    omega[:,1] = 0.5*(Wm[:,0,2] - Wm[:,2,0])
+    omega[:,2] = 0.5*(Wm[:,1,0] - Wm[:,0,1])
     # rotate FreeAcc using calibrated R (first infer body approx then reapply)
     Ab = np.einsum('tij,tj->ti', np.transpose(d["R"], (0,2,1)), d["acc"])
     Aw = np.einsum('tij,tj->ti', Rcal, Ab)
@@ -352,27 +350,18 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
         prop_fo = make_inertial_props(height, mass, L_fo, "foot")
         prop_sh = make_inertial_props(height, mass, L_sh, "shank")
         prop_th = make_inertial_props(height, mass, L_th, "thigh")
-        # dynamics
-        hipM_world = np.zeros((Tn, 3))
+        # dynamics (batched)
         alpha_th = np.gradient(Th["omega"], axis=0) / (np.gradient(Th["t"])[:, None] if Tn > 1 else 1/60.0)
         alpha_ti = np.gradient(Ti["omega"], axis=0) / (np.gradient(Ti["t"])[:, None] if Tn > 1 else 1/60.0)
-        for i in range(Tn):
-            kinF = SegmentKinematics(
-                R_WB=Rfoot[i], omega_W=Ti["omega"][i], alpha_W=alpha_ti[i],
-                r_COM_W=rcom_fo[i], a_COM_W=a_fo[i], r_prox_W=ankle[i], r_dist_W=toe[i]
-            )
-            kinS = SegmentKinematics(
-                R_WB=Ti["R"][i], omega_W=Ti["omega"][i], alpha_W=alpha_ti[i],
-                r_COM_W=rcom_sh[i], a_COM_W=a_sh[i], r_prox_W=knee[i], r_dist_W=ankle[i]
-            )
-            kinT = SegmentKinematics(
-                R_WB=Th["R"][i], omega_W=Th["omega"][i], alpha_W=alpha_th[i],
-                r_COM_W=rcom_th[i], a_COM_W=a_th[i], r_prox_W=hip[i], r_dist_W=knee[i]
-            )
-            loads = inverse_dynamics_lowerlimb_3D(
-                kinF, kinS, kinT, prop_fo, prop_sh, prop_th, F_GRF_W=Fw[i], r_CoP_W=rcop[i], M_free_W=None
-            )
-            hipM_world[i] = loads["hip"].M
+        from hip_inverse_dynamics import inverse_dynamics_lowerlimb_3D_batch
+        out = inverse_dynamics_lowerlimb_3D_batch(
+            Rfoot, Ti["omega"], alpha_ti, rcom_fo, a_fo, ankle, toe,
+            Ti["R"], Ti["omega"], alpha_ti, rcom_sh, a_sh, knee,
+            Th["R"], Th["omega"], alpha_th, rcom_th, a_th, hip,
+            prop_fo, prop_sh, prop_th,
+            Fw, rcop, None
+        )
+        hipM_world = out["hip_M_W"]
         M_thigh = np.einsum('tji,ti->tj', Th["R"], hipM_world)
         return Th["t"], M_thigh[:, 1], stance
 

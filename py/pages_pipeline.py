@@ -239,13 +239,13 @@ def _calibrate(d):
 
 def _build_chain(R_thigh, R_tibia, pelvis_h, L_thigh, L_shank, L_foot):
     T = R_thigh.shape[0]
-    hip = np.tile(np.array([0,0,pelvis_h]), (T,1))
-    knee = np.zeros((T,3)); ankle = np.zeros((T,3)); toe = np.zeros((T,3))
-    thigh_dir0 = np.array([0,0,-1.0]); shank_dir0=np.array([0,0,-1.0]); foot_dir0=np.array([1.0,0,0])
-    for i in range(T):
-        knee[i]  = hip[i]   + R_thigh[i] @ (thigh_dir0*L_thigh)
-        ankle[i] = knee[i]  + R_tibia[i] @ (shank_dir0*L_shank)
-        toe[i]   = ankle[i] + R_tibia[i] @ (foot_dir0 *L_foot)
+    hip = np.tile(np.array([0.0, 0.0, pelvis_h], dtype=float), (T,1))
+    thigh_dir0 = np.array([0.0, 0.0, -1.0], dtype=float)
+    shank_dir0 = np.array([0.0, 0.0, -1.0], dtype=float)
+    foot_dir0  = np.array([1.0, 0.0,  0.0], dtype=float)
+    knee  = hip + np.einsum('tij,j->ti', R_thigh, thigh_dir0 * L_thigh)
+    ankle = knee + np.einsum('tij,j->ti', R_tibia, shank_dir0 * L_shank)
+    toe   = ankle + np.einsum('tij,j->ti', R_tibia, foot_dir0  * L_foot)
     return hip, knee, ankle, toe, R_tibia.copy()
 
 def _detect_stance(accW, omegaW, acc_thresh=2.0, omega_thresh=1.5):
@@ -300,66 +300,81 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
 
     # 2) Overlap cleaning
     if do_overlap:
-        t0,t1 = _overlap_window([P,LTh,RTh,LTi,RTi])
-        P = _trim(P,t0,t1); LTh=_trim(LTh,t0,t1); RTh=_trim(RTh,t0,t1); LTi=_trim(LTi,t0,t1); RTi=_trim(RTi,t0,t1)
+        t0, t1 = _overlap_window([P, LTh, RTh, LTi, RTi])
+        P = _trim(P, t0, t1)
+        LTh = _trim(LTh, t0, t1)
+        RTh = _trim(RTh, t0, t1)
+        LTi = _trim(LTi, t0, t1)
+        RTi = _trim(RTi, t0, t1)
         # equalize counts
-        N = min(len(P["t"]),len(LTh["t"]),len(RTh["t"]),len(LTi["t"]),len(RTi["t"]))
-        for d in (P,LTh,RTh,LTi,RTi):
-            for k in ("t","R","omega","acc"):
-                d[k]=d[k][:N]
+        N = min(len(P["t"]), len(LTh["t"]), len(RTh["t"]), len(LTi["t"]), len(RTi["t"]))
+        for d in (P, LTh, RTh, LTi, RTi):
+            for k in ("t", "R", "omega", "acc"):
+                d[k] = d[k][:N]
 
     # 3) Standing calibration
     if do_cal:
         P = _calibrate(P)
-        LTh = _calibrate(LTh); RTh = _calibrate(RTh)
-        LTi = _calibrate(LTi); RTi = _calibrate(RTi)
+        LTh = _calibrate(LTh)
+        RTh = _calibrate(RTh)
+        LTi = _calibrate(LTi)
+        RTi = _calibrate(RTi)
 
     # 4) Kinematics model
-    scale = height/1.75
-    L_th = 0.45*scale; L_sh=0.43*scale; L_fo=0.25*scale; pelvis_h=0.95*scale; heel_to_ankle = 0.07*scale
+    scale = height / 1.75
+    L_th = 0.45 * scale
+    L_sh = 0.43 * scale
+    L_fo = 0.25 * scale
+    pelvis_h = 0.95 * scale
+    heel_to_ankle = 0.07 * scale
     fr = deleva_lower_limb_fractions()
 
     def run_side(Th, Ti):
-        Tn = len(Th["t"]); dt = np.median(np.diff(Th["t"])) if Tn>1 else 1/60.0
-        hip,knee,ankle,toe,Rfoot = _build_chain(Th["R"], Ti["R"], pelvis_h, L_th, L_sh, L_fo)
-        rcom_th = com_from_joints_linear(hip, knee,  fr["thigh"]["com"])
+        Tn = len(Th["t"])
+        dt = np.median(np.diff(Th["t"])) if Tn > 1 else 1/60.0
+        hip, knee, ankle, toe, Rfoot = _build_chain(Th["R"], Ti["R"], pelvis_h, L_th, L_sh, L_fo)
+        rcom_th = com_from_joints_linear(hip, knee, fr["thigh"]["com"])
         rcom_sh = com_from_joints_linear(knee, ankle, fr["shank"]["com"])
-        rcom_fo = com_from_joints_linear(ankle,toe,   fr["foot"]["com"])
+        rcom_fo = com_from_joints_linear(ankle, toe, fr["foot"]["com"])
         a_th, a_sh, a_fo = Th["acc"], Ti["acc"], Ti["acc"]
         stance = _detect_stance(Ti["acc"], Ti["omega"])
         u = _rocker(stance, Tn)
         # GRF
-        Ftot = np.c_[mass*P["acc"][:,0], mass*P["acc"][:,1], mass*(P["acc"][:,2]+GRAVITY[2])]
-        Fw = stance[:,None]*Ftot
-        # CoP
-        x_heel = -heel_to_ankle; x_toe = L_fo-heel_to_ankle
-        rcop = np.zeros((Tn,3))
-        for i in range(Tn):
-            copF = np.array([(1-u[i])*x_heel + u[i]*x_toe, 0, 0])
-            rcop[i] = Rfoot[i] @ copF + ankle[i]
-        # props
-        prop_fo  = make_inertial_props(height,mass,L_fo,"foot")
-        prop_sh  = make_inertial_props(height,mass,L_sh,"shank")
-        prop_th  = make_inertial_props(height,mass,L_th,"thigh")
+        Ftot = np.c_[mass * P["acc"][:, 0], mass * P["acc"][:, 1], mass * (P["acc"][:, 2] + GRAVITY[2])]
+        Fw = stance[:, None] * Ftot
+        # CoP (vectorized in world)
+        x_heel = -heel_to_ankle
+        x_toe = L_fo - heel_to_ankle
+        copFx = (1.0 - u) * x_heel + u * x_toe
+        copF = np.stack([copFx, np.zeros_like(copFx), np.zeros_like(copFx)], axis=1)
+        rcop = np.einsum('tij,tj->ti', Rfoot, copF) + ankle
+        # inertial properties
+        prop_fo = make_inertial_props(height, mass, L_fo, "foot")
+        prop_sh = make_inertial_props(height, mass, L_sh, "shank")
+        prop_th = make_inertial_props(height, mass, L_th, "thigh")
         # dynamics
-        hipM_world = np.zeros((Tn,3))
-        alpha_th = np.gradient(Th["omega"], axis=0) / (np.gradient(Th["t"])[:,None] if Tn>1 else 1/60.0)
-        alpha_ti = np.gradient(Ti["omega"], axis=0) / (np.gradient(Ti["t"])[:,None] if Tn>1 else 1/60.0)
+        hipM_world = np.zeros((Tn, 3))
+        alpha_th = np.gradient(Th["omega"], axis=0) / (np.gradient(Th["t"])[:, None] if Tn > 1 else 1/60.0)
+        alpha_ti = np.gradient(Ti["omega"], axis=0) / (np.gradient(Ti["t"])[:, None] if Tn > 1 else 1/60.0)
         for i in range(Tn):
-            kinF = SegmentKinematics(R_WB=Rfoot[i], omega_W=Ti["omega"][i], alpha_W=alpha_ti[i],
-                                     r_COM_W=rcom_fo[i], a_COM_W=a_fo[i],
-                                     r_prox_W=ankle[i], r_dist_W=toe[i])
-            kinS = SegmentKinematics(R_WB=Ti["R"][i], omega_W=Ti["omega"][i], alpha_W=alpha_ti[i],
-                                     r_COM_W=rcom_sh[i], a_COM_W=a_sh[i],
-                                     r_prox_W=knee[i], r_dist_W=ankle[i])
-            kinT = SegmentKinematics(R_WB=Th["R"][i], omega_W=Th["omega"][i], alpha_W=alpha_th[i],
-                                     r_COM_W=rcom_th[i], a_COM_W=a_th[i],
-                                     r_prox_W=hip[i], r_dist_W=knee[i])
-            loads = inverse_dynamics_lowerlimb_3D(kinF, kinS, kinT, prop_fo, prop_sh, prop_th,
-                                                  F_GRF_W=Fw[i], r_CoP_W=rcop[i], M_free_W=None)
+            kinF = SegmentKinematics(
+                R_WB=Rfoot[i], omega_W=Ti["omega"][i], alpha_W=alpha_ti[i],
+                r_COM_W=rcom_fo[i], a_COM_W=a_fo[i], r_prox_W=ankle[i], r_dist_W=toe[i]
+            )
+            kinS = SegmentKinematics(
+                R_WB=Ti["R"][i], omega_W=Ti["omega"][i], alpha_W=alpha_ti[i],
+                r_COM_W=rcom_sh[i], a_COM_W=a_sh[i], r_prox_W=knee[i], r_dist_W=ankle[i]
+            )
+            kinT = SegmentKinematics(
+                R_WB=Th["R"][i], omega_W=Th["omega"][i], alpha_W=alpha_th[i],
+                r_COM_W=rcom_th[i], a_COM_W=a_th[i], r_prox_W=hip[i], r_dist_W=knee[i]
+            )
+            loads = inverse_dynamics_lowerlimb_3D(
+                kinF, kinS, kinT, prop_fo, prop_sh, prop_th, F_GRF_W=Fw[i], r_CoP_W=rcop[i], M_free_W=None
+            )
             hipM_world[i] = loads["hip"].M
         M_thigh = np.einsum('tji,ti->tj', Th["R"], hipM_world)
-        return Th["t"], M_thigh[:,1], stance
+        return Th["t"], M_thigh[:, 1], stance
 
     tL, Mleft, stanceL = run_side(LTh, LTi)
     tR, Mright, stanceR = run_side(RTh, RTi)
@@ -368,8 +383,8 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
     pctL, meanL, sdL = _cycle_norm(tL, Mleft, stanceL)
     pctR, meanR, sdR = _cycle_norm(tR, Mright, stanceR)
     if pctL is None or pctR is None:
-        pct = list(np.linspace(0,100,101))
-        meanL_list = sdL_list = meanR_list = sdR_list = [float('nan')]*101
+        pct = list(np.linspace(0, 100, 101))
+        meanL_list = sdL_list = meanR_list = sdR_list = [float('nan')] * 101
     else:
         pct = list(pctL)  # assume both are 0..100 same
         meanL_list = list(meanL if meanL is not None else np.full(101, np.nan))
@@ -379,19 +394,19 @@ def process_files(pelvis, L_thigh, R_thigh, L_tibia, R_tibia, height, mass, do_c
 
     # CSVs
     left_df = pd.DataFrame({'time_s': tL, 'hip_My_Nm': Mleft})
-    right_df= pd.DataFrame({'time_s': tR, 'hip_My_Nm': Mright})
+    right_df = pd.DataFrame({'time_s': tR, 'hip_My_Nm': Mright})
     left_csv = left_df.to_csv(index=False)
-    right_csv= right_df.to_csv(index=False)
+    right_csv = right_df.to_csv(index=False)
 
     return dict(
         time_s=list(tL),
         left_ts=list(Mleft),
         right_ts=list(Mright),
         cycle_pct=pct,
-    left_mean=meanL_list,
-    left_sd=sdL_list,
-    right_mean=meanR_list,
-    right_sd=sdR_list,
+        left_mean=meanL_list,
+        left_sd=sdL_list,
+        right_mean=meanR_list,
+        right_sd=sdR_list,
         left_csv=left_csv,
         right_csv=right_csv,
     )

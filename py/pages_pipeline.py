@@ -83,9 +83,18 @@ def _read_xsens(path):
     qy = df[qy_col].to_numpy(float); qz=df[qz_col].to_numpy(float)
     R = np.array([_q_to_R(qw[i],qx[i],qy[i],qz[i]) for i in range(len(df))])
     if stf_col is not None:
-        # Heuristic: SampleTimeFine is in 0.1 ms ticks (10 kHz). If value seems very large, divide accordingly
+        # Auto-detect units for SampleTimeFine by matching expected 60 Hz dt
         t_raw = df[stf_col].to_numpy(float)
-        t = t_raw / (1e4 if t_raw.max() > 1e3 else 1.0)
+        if len(t_raw) > 1:
+            d = float(np.median(np.diff(t_raw)))
+            # Try common scales: microseconds, 0.1 ms ticks (10 kHz), milliseconds, seconds
+            scales = [1e6, 1e4, 1e3, 1.0]
+            target_dt = 1.0/60.0
+            diffs = [abs((d/s) - target_dt) for s in scales]
+            best_scale = scales[int(np.argmin(diffs))]
+            t = t_raw / best_scale
+        else:
+            t = np.array([0.0])
         t = t - t[0]
         inc = np.diff(t, prepend=t[0]-1e-6) > 0
         if not inc.all():
